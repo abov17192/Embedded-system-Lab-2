@@ -1,0 +1,172 @@
+import tkinter as tk
+from tkinter import ttk
+import sqlite3
+import serial
+import threading
+import datetime
+import time
+
+SERIAL_PORT = "/dev/cu.usbmodem1201"
+BAUD_RATE = 9600
+DB_FILE = "rfid_log.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE,
+            first_seen TEXT,
+            last_seen TEXT,
+            count INTEGER
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_tag(uid):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+
+    c.execute("SELECT count FROM tags WHERE uid=?", (uid,))
+    row = c.fetchone()
+
+    if row:
+        count = row[0] + 1
+        c.execute("UPDATE tags SET count=?, last_seen=? WHERE uid=?",
+                  (count, now, uid))
+    else:
+        count = 1
+        c.execute("INSERT INTO tags VALUES (NULL,?,?,?,?)",
+                  (uid, now, now, count))
+
+    conn.commit()
+    conn.close()
+    return count
+
+def get_all():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM tags ORDER BY last_seen DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+BG = "#0b0f1a"
+CARD = "#141a2e"
+ACCENT = "#00e5cc"
+TEXT = "#e6f1ff"
+RED = "#ff4d4d"
+YELLOW = "#ffd54f"
+GREEN = "#69f0ae"
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("RFID Security Dashboard")
+        self.root.geometry("850x500")
+        self.root.configure(bg=BG)
+
+        tk.Label(root, text="RFID SECURITY DASHBOARD",
+                 font=("Arial", 18, "bold"),
+                 bg=BG, fg=ACCENT).pack(pady=10)
+
+        self.status_bar = tk.Label(
+            root,
+            text="STATE: WAITING",
+            font=("Arial", 14, "bold"),
+            bg=CARD,
+            fg=YELLOW,
+            pady=10
+        )
+        self.status_bar.pack(fill="x", padx=20, pady=10)
+
+        self.last_label = tk.Label(
+            root,
+            text="Last Tag: None",
+            font=("Arial", 12, "bold"),
+            bg=BG,
+            fg=TEXT
+        )
+        self.last_label.pack(pady=5)
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview",
+                        background=CARD,
+                        fieldbackground=CARD,
+                        foreground=TEXT,
+                        rowheight=25)
+
+        style.configure("Treeview.Heading",
+                        background=BG,
+                        foreground=ACCENT,
+                        font=("Arial", 10, "bold"))
+
+        self.tree = ttk.Treeview(root,
+                                 columns=("id","uid","first","last","count"),
+                                 show="headings")
+
+        for col in ("id","uid","first","last","count"):
+            self.tree.heading(col, text=col.upper())
+
+        self.tree.pack(fill="both", expand=True, padx=20, pady=10)
+
+        try:
+            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+        except:
+            self.ser = None
+
+        threading.Thread(target=self.read_serial, daemon=True).start()
+        self.refresh_table()
+
+    def set_state(self, state):
+        if state == "WAITING":
+            self.status_bar.config(text="STATE: WAITING", fg=YELLOW)
+        elif state == "LOCKED":
+            self.status_bar.config(text="STATE: LOCKED", fg=RED)
+        elif state == "UNLOCKED":
+            self.status_bar.config(text="STATE: UNLOCKED", fg=GREEN)
+
+    def read_serial(self):
+        while True:
+            try:
+                if self.ser and self.ser.in_waiting:
+                    line = self.ser.readline().decode().strip()
+                    print(line)
+
+                    if line == "SYSTEM_LOCKED":
+                        self.root.after(0, lambda: self.set_state("LOCKED"))
+
+                    elif line == "SYSTEM_UNLOCKED":
+                        self.root.after(0, lambda: self.set_state("UNLOCKED"))
+
+                    elif line.startswith("RFID_TAG:"):
+                        uid = line.split(":")[1]
+                        count = save_tag(uid)
+
+                        self.root.after(0, lambda u=uid, c=count:
+                            self.last_label.config(text=f"Last Tag: {u} ({c})")
+                        )
+
+                        self.root.after(0, self.refresh_table)
+
+                time.sleep(0.05)
+
+            except:
+                pass
+
+    def refresh_table(self):
+        self.tree.delete(*self.tree.get_children())
+
+        for row in get_all():
+            self.tree.insert("", "end", values=row)
+
+if __name__ == "__main__":
+    init_db()
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
