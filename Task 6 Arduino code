@@ -1,0 +1,76 @@
+#include <Arduino.h>
+#include <Servo.h>
+#include <Stepper.h>
+
+Servo servo;
+Stepper stepper(2048, 8, 10, 9, 11);
+
+int score = 0;
+bool isWait = false, isGo = false, isLive = false;
+unsigned long wStart, wTime, gTime;
+bool lB1 = 1, lB2 = 1;
+
+void setup() {
+  pinMode(2, INPUT_PULLUP); pinMode(3, INPUT_PULLUP); pinMode(4, OUTPUT);
+  servo.attach(6); servo.write(90);
+  stepper.setSpeed(12);
+  Serial.begin(9600);
+  randomSeed(analogRead(0));
+}
+
+void endRound(int win, bool pen, unsigned long ms) {
+  isWait = isGo = isLive = false;
+
+  if (win == 1) {
+    score++;
+    servo.write(30); stepper.step(100);
+    Serial.println(pen ? "P2_PENALTY" : "P1_WIN:" + String(ms));
+  } else {
+    score--;
+    servo.write(150); stepper.step(-100);
+    Serial.println(pen ? "P1_PENALTY" : "P2_WIN:" + String(ms));
+  }
+
+  score = constrain(score, -3, 3);
+
+  tone(4, pen ? 200 : 1000, 200);
+
+  Serial.print("SCORE:"); Serial.println(score);
+
+  if (score >= 3) {
+    Serial.println("VICTORY:1");
+    stepper.step(2048);
+    score = 0;
+  } else if (score <= -3) {
+    Serial.println("VICTORY:2");
+    stepper.step(-2048);
+    score = 0;
+  }
+}
+
+void loop() {
+  if (Serial.available()) {
+    char cmd = Serial.read();
+    if (cmd == 'S' && !isLive) {
+      isLive = true; isWait = true;
+      wStart = millis(); wTime = random(1000, 20000);
+      Serial.println("START_ACK");
+    } else if (cmd == 'R') {
+      score = 0; servo.write(90);
+      isWait = isGo = isLive = false;
+      Serial.println("RESET_ACK");
+    }
+  }
+
+  if (isWait && (millis() - wStart >= wTime)) {
+    isWait = false; isGo = true; gTime = millis();
+    tone(4, 880, 150); Serial.println("GO");
+  }
+
+  if (isLive) {
+    bool b1 = digitalRead(2), b2 = digitalRead(3);
+    if (lB1 && !b1) endRound(isGo ? 1 : 2, !isGo, millis() - gTime);
+    if (lB2 && !b2) endRound(isGo ? 2 : 1, !isGo, millis() - gTime);
+    lB1 = b1; lB2 = b2;
+  }
+}
