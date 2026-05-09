@@ -1,0 +1,243 @@
+import serial, threading, os, csv, tkinter as tk
+from tkinter import ttk
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from datetime import datetime
+
+BG_DARK = "#050508"
+CARD_BG = "#12121f"
+CYAN = "#00f2ff"
+MAGENTA = "#ff00ff"
+RECORDS_DIR = "lab6_player_data"
+PORT = "/dev/cu.usbmodem11201"
+
+os.makedirs(RECORDS_DIR, exist_ok=True)
+current_match_id = ""
+
+try:
+    arduino = serial.Serial(PORT, 9600, timeout=1)
+except:
+    arduino = None
+
+def save_session(player, opponent, ms, result, round_outcome="IN_PROGRESS"):
+    filename = os.path.join(RECORDS_DIR, f"{player}.csv")
+    is_new = not os.path.exists(filename)
+    with open(filename, "a", newline="") as f:
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow(["match_id", "opponent", "ms", "result", "round_outcome", "timestamp"])
+        writer.writerow([current_match_id, opponent, ms, result, round_outcome,
+                         datetime.now().strftime("%H:%M:%S")])
+
+def update_tug_display(raw_score):
+    p1_lit = max(0, raw_score)
+    p2_lit = max(0, -raw_score)
+
+    for i in range(3):
+        pips1[i].config(fg=CYAN    if i < p1_lit else "#222")
+        pips2[i].config(fg=MAGENTA if i < p2_lit else "#222")
+
+    if raw_score > 0:
+        score_lbl.config(text=f"◀  {name1.get()} leads  +{raw_score}", fg=CYAN)
+    elif raw_score < 0:
+        score_lbl.config(text=f"{name2.get()} leads  +{abs(raw_score)}  ▶", fg=MAGENTA)
+    else:
+        score_lbl.config(text="— TIED —", fg="white")
+
+def open_analytics():
+    hub = tk.Toplevel(root)
+    hub.title("Lab 6 Analytics Hub")
+    hub.geometry("1100x750")
+    hub.configure(bg=BG_DARK)
+
+    sidebar = tk.Frame(hub, bg=CARD_BG, width=300)
+    sidebar.pack(side="left", fill="y", padx=2, pady=2)
+
+    tk.Label(sidebar, text="1. SELECT PLAYER", fg=CYAN, bg=CARD_BG,
+             font=("Arial", 10, "bold")).pack(pady=(20, 5))
+    p_box = tk.Listbox(sidebar, bg=BG_DARK, fg="white", bd=0, height=5,
+                       highlightthickness=0)
+    p_box.pack(fill="x", padx=15)
+    for p in [f.replace(".csv", "") for f in os.listdir(RECORDS_DIR)]:
+        p_box.insert(tk.END, p)
+
+    tk.Label(sidebar, text="2. FILTER BY OPPONENT", fg=MAGENTA, bg=CARD_BG,
+             font=("Arial", 10, "bold")).pack(pady=(20, 5))
+    opp_filter = ttk.Combobox(sidebar, state="readonly")
+    opp_filter.pack(fill="x", padx=15)
+
+    tk.Label(sidebar, text="3. SELECT ROUND", fg=CYAN, bg=CARD_BG,
+             font=("Arial", 10, "bold")).pack(pady=(20, 5))
+    round_menu = ttk.Combobox(sidebar, state="readonly")
+    round_menu.pack(fill="x", padx=15)
+
+    res_lbl = tk.Label(sidebar, text="ROUND RESULT: ---", fg="white", bg=CARD_BG,
+                       font=("Arial", 11, "bold"))
+    res_lbl.pack(pady=20)
+
+    chart_area = tk.Frame(hub, bg=BG_DARK)
+    chart_area.pack(side="right", fill="both", expand=True)
+
+    def on_player_select(event):
+        p_name = p_box.get(tk.ACTIVE)
+        opponents = set()
+        path = os.path.join(RECORDS_DIR, f"{p_name}.csv")
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                for row in csv.DictReader(f):
+                    opponents.add(row["opponent"])
+        opp_filter['values'] = sorted(list(opponents))
+
+    def on_opponent_select(event):
+        p_name = p_box.get(tk.ACTIVE)
+        target_opp = opp_filter.get()
+        rounds = set()
+        with open(os.path.join(RECORDS_DIR, f"{p_name}.csv"), "r") as f:
+            for row in csv.DictReader(f):
+                if row["opponent"] == target_opp:
+                    rounds.add(row["match_id"])
+        round_menu['values'] = sorted(list(rounds), reverse=True)
+
+    def draw_graph(event):
+        p_name = p_box.get(tk.ACTIVE)
+        m_id = round_menu.get()
+        sessions = []
+        outcome = "UNKNOWN"
+
+        with open(os.path.join(RECORDS_DIR, f"{p_name}.csv"), "r") as f:
+            for row in csv.DictReader(f):
+                if row["match_id"] == m_id:
+                    if row["round_outcome"] != "IN_PROGRESS":
+                        outcome = row["round_outcome"]
+                    if "WIN" in row["result"]:
+                        sessions.append(int(row["ms"]))
+
+        res_lbl.config(text=f"ROUND RESULT: {outcome}",
+                       fg=CYAN if outcome == "VICTORY" else "red")
+        for w in chart_area.winfo_children():
+            w.destroy()
+
+        fig, ax = plt.subplots(figsize=(7, 5), facecolor=BG_DARK)
+        ax.set_facecolor(CARD_BG)
+        x_vals = range(1, len(sessions) + 1)
+        ax.bar(x_vals, sessions, color=CYAN if outcome == "VICTORY" else "red", width=0.4)
+        ax.set_xticks(x_vals)
+        ax.set_title(f"{p_name} vs {opp_filter.get()} ({outcome})", color='white')
+        ax.set_ylabel("Reaction Time (ms)", color='white')
+        ax.tick_params(colors='white')
+
+        canvas = FigureCanvasTkAgg(fig, master=chart_area)
+        canvas.draw()
+        canvas.get_tk_widget().pack(pady=40)
+        plt.close(fig)
+
+    p_box.bind("<<ListboxSelect>>", on_player_select)
+    opp_filter.bind("<<ComboboxSelected>>", on_opponent_select)
+    round_menu.bind("<<ComboboxSelected>>", draw_graph)
+
+def listen():
+    global current_match_id
+    while arduino:
+        line = arduino.readline().decode().strip()
+        if not line:
+            continue
+
+        if line == "START_ACK":
+            if not current_match_id:
+                current_match_id = datetime.now().strftime("%b%d_%H:%M")
+            root.after(0, lambda: status_lbl.config(text="STATUS: COUNTING...", fg="#ffd700"))
+
+        elif line == "RESET_ACK":
+            root.after(0, lambda: [
+                update_tug_display(0),
+                status_lbl.config(text="SYSTEM READY", fg="white")
+            ])
+
+        elif line.startswith("SCORE:"):
+            raw_score = int(line[6:])
+            root.after(0, lambda s=raw_score: update_tug_display(s))
+
+        elif line.startswith("P1_WIN:") or line.startswith("P2_WIN:"):
+            p1_won = line.startswith("P1_WIN")
+            ms = line.split(":")[1]
+            w = name1.get() if p1_won else name2.get()
+            l = name2.get() if p1_won else name1.get()
+            save_session(w, l, ms, "SESSION_WIN")
+            save_session(l, w, "0", "SESSION_LOSS")
+            root.after(0, lambda winner=w: status_lbl.config(
+                text=f"SESSION WON BY {winner}  →  Press START for next",
+                fg=CYAN if winner == name1.get() else MAGENTA
+            ))
+
+        elif "PENALTY" in line:
+            culprit = name1.get() if "P1" in line else name2.get()
+            root.after(0, lambda c=culprit: status_lbl.config(
+                text=f"⚠ FALSE START by {c}!", fg="orange"
+            ))
+
+        elif line.startswith("VICTORY:"):
+            p1_wins = "1" in line
+            win_p  = name1.get() if p1_wins else name2.get()
+            lose_p = name2.get() if p1_wins else name1.get()
+            save_session(win_p,  lose_p, "0", "ROUND_END", "VICTORY")
+            save_session(lose_p, win_p,  "0", "ROUND_END", "DEFEAT")
+            current_match_id = ""
+            root.after(0, lambda w=win_p: [
+                update_tug_display(0),
+                status_lbl.config(text=f"🏆 {w} WINS THE MATCH!", fg=CYAN)
+            ])
+
+root = tk.Tk()
+root.title("Lab 6 Reaction Analyzer")
+root.geometry("600x700")
+root.configure(bg=BG_DARK)
+
+tk.Label(root, text="LAB 6: REACTION TRACKER", font=("Impact", 24),
+         fg=CYAN, bg=BG_DARK).pack(pady=20)
+
+card = tk.Frame(root, bg=CARD_BG, padx=30, pady=30,
+                highlightthickness=1, highlightbackground="#333")
+card.pack()
+
+name1 = tk.Entry(card, bg=BG_DARK, fg=CYAN,    font=("Courier", 12, "bold"),
+                 justify="center", width=12)
+name2 = tk.Entry(card, bg=BG_DARK, fg=MAGENTA, font=("Courier", 12, "bold"),
+                 justify="center", width=12)
+name1.insert(0, "Player 1"); name2.insert(0, "Player 2")
+name1.grid(row=0, column=0)
+name2.grid(row=0, column=2)
+tk.Label(card, text="VS", fg="white", bg=CARD_BG,
+         font=("Impact", 14)).grid(row=0, column=1, padx=20)
+
+pips1 = [tk.Label(card, text="■", font=("Arial", 20), bg=CARD_BG, fg="#222") for _ in range(3)]
+pips2 = [tk.Label(card, text="■", font=("Arial", 20), bg=CARD_BG, fg="#222") for _ in range(3)]
+for i in range(3):
+    pips1[i].grid(row=1, column=0, sticky="w", padx=i*30)
+    pips2[i].grid(row=1, column=2, sticky="e", padx=i*30)
+
+score_lbl = tk.Label(root, text="— TIED —", font=("Courier", 13, "bold"),
+                     fg="white", bg=BG_DARK)
+score_lbl.pack(pady=5)
+
+status_lbl = tk.Label(root, text="SYSTEM READY", font=("Courier", 11),
+                      fg="white", bg=BG_DARK)
+status_lbl.pack(pady=20)
+
+btn_f = tk.Frame(root, bg=BG_DARK)
+btn_f.pack()
+tk.Button(btn_f, text="START SESSION", bg="#1a1a2e", fg=CYAN,    width=15, height=2,
+          command=lambda: arduino.write(b'S') if arduino else None
+          ).grid(row=0, column=0, padx=10)
+tk.Button(btn_f, text="RESET MATCH",   bg="#1a1a2e", fg=MAGENTA, width=15, height=2,
+          command=lambda: [arduino.write(b'R'),
+                           update_tug_display(0),
+                           status_lbl.config(text="SYSTEM READY", fg="white")]
+                          if arduino else None
+          ).grid(row=0, column=1, padx=10)
+
+tk.Button(root, text="OPEN DATA ANALYTICS HUB", font=("Arial", 10, "bold"),
+          bg=CYAN, fg="black", width=35, height=2,
+          command=open_analytics).pack(pady=30)
+
+threading.Thread(target=listen, daemon=True).start()
+root.mainloop()
